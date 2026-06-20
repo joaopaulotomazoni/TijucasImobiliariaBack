@@ -1,0 +1,16 @@
+O que foi entregue
+Fase 1 — Banco (aplicada no Supabase, docs/database_schema.sql atualizado + docs/migrations/001_garantias.sql):
+
+Tabela garantias (supertipo) com índice único parcial que o próprio banco usa pra impedir mais de uma garantia ativa por contrato (art. 37).
+garantia_caucao, garantia_fiadores, garantia_seguro_fianca (detalhes), com trigger que barra caução em dinheiro > 3× aluguel (art. 38) e CHECK de outorga conjugal (CC art. 1.647).
+Removidos tipo_garantia/valor_caucao de contratos; adicionados data_devolucao_imovel (art. 39) e CHECK de reajuste ≥ 12 meses (Lei 10.192/2001). Órfãos de endereço limpos.
+Fase 2 — Contratos (contracts.*): CRUD completo; criar contrato marca imóvel como ALUGADO, deletar libera; sobreposição de contratos bloqueada (409).
+
+Fase 3 — Garantias (guarantees.*): criação com discriminatedUnion por tipo, substituição (art. 40, mantém histórico), exoneração de fiador (art. 40, X — calcula os 120 dias), devolução de caução (só após devolução do imóvel).
+
+Fase 4 — Upload S3 (uploads.* + storage.service.js): presigned URLs de PUT/GET, bucket privado, allowlist de content-type, proteção contra path-traversal. Client S3 preguiçoso — o app sobe normalmente mesmo sem as credenciais AWS.
+
+O que falta você fazer
+Preencher as variáveis AWS no .env (AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_S3_BUCKET) e criar o bucket com Block Public Access ligado. Enquanto não fizer, o CRUD/garantias funcionam normalmente e só /uploads/* responde 503.
+Validar a modelagem legal com o jurídico da imobiliária — reforço o aviso do plano: não sou advogado, o schema reflete minha leitura da Lei 8.245/91 + Código Civil, mas prazos de exoneração, regras de outorga e retenção de caução merecem revisão profissional antes de produção.
+Uma observação de segurança que fica pendente (não bloqueia): o .env com senhas reais (banco, e-mail, JWT) está no working tree. O .gitignore já cobre .env, então não vai pro Git — mas as credenciais ficaram visíveis nesta conversa; se algo aqui for compartilhado, vale rotacioná-las.
