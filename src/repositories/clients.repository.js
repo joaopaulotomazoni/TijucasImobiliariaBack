@@ -52,16 +52,20 @@ class ClientsRepository {
       if (contasBancarias?.length) {
         for (const conta of contasBancarias) {
           await client.query(
-            `INSERT INTO contas_bancarias (usuario_id, banco, agencia, conta, tipo_conta, chave_pix, principal)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            `INSERT INTO contas_bancarias
+               (usuario_id, banco, agencia, conta, digito, tipo_conta, chave_pix, pix_key_type, cpf_cnpj_titular, principal)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
             [
               usuarioId,
               conta.banco,
               conta.agencia,
               conta.conta,
+              conta.digito || null,
               conta.tipoConta,
               conta.chavePix || null,
-              conta.principal ?? true,
+              conta.pixKeyType || null,
+              conta.cpfCnpjTitular || null,
+              conta.principal ?? false,
             ]
           );
         }
@@ -95,8 +99,11 @@ class ClientsRepository {
            banco,
            agencia,
            conta,
+           digito,
            tipo_conta,
            chave_pix,
+           pix_key_type,
+           cpf_cnpj_titular,
            principal
          )`
       )
@@ -207,7 +214,12 @@ class ClientsRepository {
 
       await client.query(
         `UPDATE usuarios
-         SET nome_completo = $1, documento = $2, email = $3, telefone = $4, rg = $5, data_nascimento = $6
+         SET nome_completo = $1, documento = $2, email = $3,
+             email_verificado = CASE
+               WHEN email IS DISTINCT FROM $3 THEN false
+               ELSE email_verificado
+             END,
+             telefone = $4, rg = $5, data_nascimento = $6
          WHERE id = $7`,
         [
           nomeCompleto,
@@ -232,15 +244,19 @@ class ClientsRepository {
           if (conta.id) {
             await client.query(
               `UPDATE contas_bancarias
-               SET banco = $1, agencia = $2, conta = $3, tipo_conta = $4, chave_pix = $5, principal = $6
-               WHERE id = $7 AND usuario_id = $8`,
+               SET banco = $1, agencia = $2, conta = $3, digito = $4, tipo_conta = $5,
+                   chave_pix = $6, pix_key_type = $7, cpf_cnpj_titular = $8, principal = $9
+               WHERE id = $10 AND usuario_id = $11`,
               [
                 conta.banco,
                 conta.agencia,
                 conta.conta,
+                conta.digito || null,
                 conta.tipoConta,
                 conta.chavePix || null,
-                conta.principal ?? true,
+                conta.pixKeyType || null,
+                conta.cpfCnpjTitular || null,
+                conta.principal ?? false,
                 conta.id,
                 id,
               ]
@@ -248,17 +264,21 @@ class ClientsRepository {
             keptContaIds.push(conta.id);
           } else {
             const contaResult = await client.query(
-              `INSERT INTO contas_bancarias (usuario_id, banco, agencia, conta, tipo_conta, chave_pix, principal)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)
+              `INSERT INTO contas_bancarias
+                 (usuario_id, banco, agencia, conta, digito, tipo_conta, chave_pix, pix_key_type, cpf_cnpj_titular, principal)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                RETURNING id`,
               [
                 id,
                 conta.banco,
                 conta.agencia,
                 conta.conta,
+                conta.digito || null,
                 conta.tipoConta,
                 conta.chavePix || null,
-                conta.principal ?? true,
+                conta.pixKeyType || null,
+                conta.cpfCnpjTitular || null,
+                conta.principal ?? false,
               ]
             );
             keptContaIds.push(contaResult.rows[0].id);
@@ -291,7 +311,7 @@ class ClientsRepository {
       } catch (error) {
         if (error.code === '23503') {
           throw new AppError(
-            'Não é possível excluir este cliente: existem contratos vinculados a ele.',
+            'Não é possível excluir este cliente: existem imóveis, contratos ou registros financeiros vinculados.',
             409
           );
         }

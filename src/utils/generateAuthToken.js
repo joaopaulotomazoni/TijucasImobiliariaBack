@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 
-const TOKEN_EXPIRATION = '7d';
+const TOKEN_EXPIRATION = process.env.JWT_EXPIRES_IN || '8h';
 
 /**
  * Gera o JWT de autenticação com o payload padrão da aplicação.
@@ -10,10 +10,20 @@ const TOKEN_EXPIRATION = '7d';
  * @param {{ id: number, email: string, perfil?: string }} user
  * @returns {string} token assinado
  */
-export function generateAuthToken({ id, email, perfil }) {
+export function generateAuthToken({ id, email, perfil, auth_version, authVersion }) {
   return jwt.sign(
-    { userId: id, email, perfil },
+    {
+      userId: id,
+      email,
+      perfil,
+      authVersion: Number(authVersion ?? auth_version ?? 0),
+    },
     process.env.JWT_SECRET,
-    { expiresIn: TOKEN_EXPIRATION }
+    {
+      expiresIn: TOKEN_EXPIRATION,
+      algorithm: 'HS256',
+      issuer: process.env.JWT_ISSUER || 'tijucas-imobiliaria',
+      audience: process.env.JWT_AUDIENCE || 'tijucas-imobiliaria-app',
+    }
   );
 }

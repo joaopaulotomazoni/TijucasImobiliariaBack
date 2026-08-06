@@ -40,4 +40,27 @@ router.put(
   GuaranteesController.exonerarFiador
 );
 
+router.post(
+  '/guarantees/:id/caucao/pix',
+  authMiddleware,
+  verifyEmployee,
+  GuaranteesController.generateCaucaoPix
+);
+router.get(
+  '/guarantees/my/caucao',
+  authMiddleware,
+  GuaranteesController.getMyCaucoes
+);
+router.put(
+  '/guarantees/:id/caucao/comprovante',
+  authMiddleware,
+  GuaranteesController.attachCaucaoProof
+);
+router.put(
+  '/guarantees/:id/caucao/status',
+  authMiddleware,
+  verifyEmployee,
+  GuaranteesController.reviewCaucao
+);
+
 export default router;

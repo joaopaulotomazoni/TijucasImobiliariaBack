@@ -1,9 +1,12 @@
 import { z } from 'zod';
 import GuaranteesServices from '../services/guarantees.service.js';
 import { toNumber } from '../utils/zodHelpers.js';
+import { isValidIsoDate } from '../utils/isoDate.js';
 
 const dateString = (message) =>
-  z.string().regex(/^\d{4}-\d{2}-\d{2}$/, { message });
+  z.string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, { message })
+    .refine(isValidIsoDate, { message });
 
 // Endereço do imóvel dado em garantia pelo fiador (opcional).
 const guaranteeAddressSchema = z.object({
@@ -37,7 +40,7 @@ const caucaoSchema = z.object({
         required_error: 'O valor da caução é obrigatório.',
         invalid_type_error: 'O valor da caução deve ser um número válido.',
       })
-      .min(0, { message: 'O valor da caução deve ser maior ou igual a zero.' })
+      .positive({ message: 'O valor da caução deve ser maior que zero.' })
   ),
   banco: z.string().optional(),
   agencia: z.string().optional(),
@@ -51,9 +54,10 @@ const fiadorSchema = z.object({
   usuarioId: z.number({
     required_error: 'O ID do fiador é obrigatório.',
     invalid_type_error: 'O ID do fiador deve ser um número.',
-  }),
+  }).int().positive(),
   rendaComprovada: toNumber(z.number().min(0).optional()),
   comprovanteRendaKey: z.string().optional(),
+  certidaoImovelKey: z.string().optional(),
   imovelGarantiaEnderecoId: z.number().optional(),
   imovelGarantiaEndereco: guaranteeAddressSchema.optional(),
   imovelGarantiaMatricula: z.string().optional(),
@@ -153,7 +157,11 @@ class GuaranteesController {
 
       const guaranteeData = guaranteeSchema.parse(request.body.guarantee);
 
-      await GuaranteesServices.createGuarantee(contratoId, guaranteeData);
+      await GuaranteesServices.createGuarantee(
+        contratoId,
+        guaranteeData,
+        request.user
+      );
 
       return response.status(201).json({
         status: 'success',
@@ -170,7 +178,12 @@ class GuaranteesController {
 
       const { motivo, garantia } = substituteSchema.parse(request.body);
 
-      await GuaranteesServices.substituteGuarantee(id, motivo, garantia);
+      await GuaranteesServices.substituteGuarantee(
+        id,
+        motivo,
+        garantia,
+        request.user
+      );
 
       return response.status(200).json({
         status: 'success',
@@ -187,7 +200,11 @@ class GuaranteesController {
 
       const devolucaoData = devolucaoSchema.parse(request.body);
 
-      await GuaranteesServices.registerCaucaoDevolucao(id, devolucaoData);
+      await GuaranteesServices.registerCaucaoDevolucao(
+        id,
+        devolucaoData,
+        request.user
+      );
 
       return response.status(200).json({
         status: 'success',
@@ -207,7 +224,8 @@ class GuaranteesController {
       const result = await GuaranteesServices.exonerarFiador(
         id,
         usuarioId,
-        exoneracaoData
+        exoneracaoData,
+        request.user
       );
 
       return response.status(200).json({
@@ -218,6 +236,46 @@ class GuaranteesController {
     } catch (error) {
       next(error);
     }
+  }
+
+  async generateCaucaoPix(request, response, next) {
+    try {
+      const data = await GuaranteesServices.generateCaucaoPix(request.params.id);
+      return response.status(200).json({ status: 'success', data });
+    } catch (error) { next(error); }
+  }
+
+  async getMyCaucoes(request, response, next) {
+    try {
+      const data = await GuaranteesServices.getMyCaucoes(request.user.userId);
+      return response.status(200).json({ status: 'success', data });
+    } catch (error) { next(error); }
+  }
+
+  async attachCaucaoProof(request, response, next) {
+    try {
+      const payload = z.object({ key: z.string().min(1) }).parse(request.body);
+      const data = await GuaranteesServices.attachCaucaoProof(
+        request.params.id,
+        payload.key,
+        request.user
+      );
+      return response.status(200).json({ status: 'success', data });
+    } catch (error) { next(error); }
+  }
+
+  async reviewCaucao(request, response, next) {
+    try {
+      const payload = z.object({
+        status: z.enum(['PAGO', 'REJEITADO']),
+      }).parse(request.body);
+      const data = await GuaranteesServices.reviewCaucao(
+        request.params.id,
+        payload.status,
+        request.user.userId
+      );
+      return response.status(200).json({ status: 'success', data });
+    } catch (error) { next(error); }
   }
 }
 

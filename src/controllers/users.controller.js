@@ -1,5 +1,8 @@
 import { z } from 'zod';
 import UsersServices from '../services/users.service.js';
+import { isValidCpfCnpj } from '../utils/brazilianDocument.js';
+import { isValidIsoDate } from '../utils/isoDate.js';
+import { clearAuthCookie, setAuthCookie } from '../utils/authCookie.js';
 
 class UsersController {
   async registerUser(request, response, next) {
@@ -13,6 +16,8 @@ class UsersController {
             }),
           email: z
             .string({ required_error: 'O e-mail é obrigatório.' })
+            .trim()
+            .toLowerCase()
             .email({ message: 'Formato de e-mail inválido.' }),
           phone: z
             .string({ required_error: 'O telefone é obrigatório.' })
@@ -22,10 +27,14 @@ class UsersController {
             .transform((value) => value.replace(/\D/g, ''))
             .refine((value) => value.length === 11 || value.length === 14, {
               message: 'O documento deve conter 11 (CPF) ou 14 (CNPJ) dígitos.',
+            })
+            .refine(isValidCpfCnpj, {
+              message: 'CPF/CNPJ inválido.',
             }),
           password: z
             .string({ required_error: 'A senha é obrigatória.' })
-            .min(6, { message: 'A senha deve ter no mínimo 6 caracteres.' }),
+            .min(10, { message: 'A senha deve ter no mínimo 10 caracteres.' })
+            .max(128, { message: 'A senha deve ter no máximo 128 caracteres.' }),
           confirmPassword: z.string({
             required_error: 'A confirmação de senha é obrigatória.',
           }),
@@ -33,7 +42,10 @@ class UsersController {
             required_error: 'O tipo de pessoa é obrigatório.',
           }),
           rg: z.string().optional(),
-          dataNascimento: z.string().optional(),
+          dataNascimento: z
+            .string()
+            .refine(isValidIsoDate, { message: 'Data de nascimento inválida.' })
+            .optional(),
         })
         .refine((data) => data.password === data.confirmPassword, {
           message: 'As senhas não coincidem.',
@@ -46,11 +58,14 @@ class UsersController {
 
       return response.status(201).json({
         status: 'success',
-        message: 'Usuário registrado com sucesso',
+        message: newUser.emailDeliveryPending
+          ? 'Usuário registrado, mas o e-mail não pôde ser enviado. Solicite um novo código.'
+          : 'Usuário registrado com sucesso',
         user: {
           id: newUser.id,
           fullName: newUser.nome_completo,
           email: newUser.email,
+          emailDeliveryPending: Boolean(newUser.emailDeliveryPending),
         },
       });
     } catch (error) {
@@ -62,15 +77,19 @@ class UsersController {
   async sendVerifyCode(request, response, next) {
     try {
       const resendCodeSchema = z.object({
-        userId: z.number().optional(),
         email: z
           .string({ required_error: 'O e-mail é obrigatório.' })
+          .trim()
+          .toLowerCase()
           .email({ message: 'Formato de e-mail inválido.' }),
       });
 
-      const { userId, email } = resendCodeSchema.parse(request.body);
+      const { email } = resendCodeSchema.parse(request.body);
+      const tipo = request.path.startsWith('/forgot-password')
+        ? 'RESET_SENHA'
+        : 'VERIFICACAO_EMAIL';
 
-      await UsersServices.sendVerificationFlow({ userId, email });
+      await UsersServices.sendVerificationFlow({ email, tipo });
 
       return response.status(200).json({
         status: 'success',
@@ -93,14 +112,16 @@ class UsersController {
 
       const { code, userId } = confirmCodeSchema.parse(request.body);
 
-      const authToken = await UsersServices.confirmVerifyCode({
+      const { token: authToken, userData } =
+        await UsersServices.confirmVerifyCode({
         code,
         userId,
       });
+      setAuthCookie(response, authToken);
 
       return response.status(200).json({
         status: 'success',
-        authToken,
+        userData,
       });
     } catch (error) {
       console.log(error);
@@ -113,8 +134,10 @@ class UsersController {
       const loginSchema = z.object({
         email: z
           .string({ required_error: 'O e-mail é obrigatório.' })
+          .trim()
+          .toLowerCase()
           .email({ message: 'Formato de e-mail inválido.' }),
-        password: z.string().optional(),
+        password: z.string().max(128).optional(),
       });
 
       const { email, password } = loginSchema.parse(request.body);
@@ -125,20 +148,12 @@ class UsersController {
           password,
         });
 
-      if (requiresPasswordSetup) {
-        return response.status(200).json({
-          status: 'success',
-          requiresPasswordSetup: true,
-          userId: userData.id,
-          message: 'Defina sua senha para continuar.',
-        });
-      }
+      setAuthCookie(response, token);
 
       return response.status(200).json({
         status: 'success',
         message: 'Login bem-sucedido.',
         userData,
-        token,
       });
     } catch (error) {
       next(error);
@@ -151,13 +166,16 @@ class UsersController {
         .object({
           email: z
             .string({ required_error: 'O e-mail é obrigatório.' })
+            .trim()
+            .toLowerCase()
             .email({ message: 'Formato de e-mail inválido.' }),
           code: z.string({
             required_error: 'O código de verificação é obrigatório.',
           }),
           newPassword: z
             .string({ required_error: 'A nova senha é obrigatória.' })
-            .min(6, { message: 'A senha deve ter no mínimo 6 caracteres.' }),
+            .min(10, { message: 'A senha deve ter no mínimo 10 caracteres.' })
+            .max(128, { message: 'A senha deve ter no máximo 128 caracteres.' }),
           confirmPassword: z.string({
             required_error: 'A confirmação de senha é obrigatória.',
           }),
@@ -176,16 +194,21 @@ class UsersController {
         code,
         newPassword,
       });
+      setAuthCookie(response, token);
 
       return response.status(200).json({
         status: 'success',
         message: 'Senha atualizada com sucesso.',
         userData,
-        token,
       });
     } catch (error) {
       next(error);
     }
+  }
+
+  async logout(_request, response) {
+    clearAuthCookie(response);
+    return response.status(204).send();
   }
 }
 

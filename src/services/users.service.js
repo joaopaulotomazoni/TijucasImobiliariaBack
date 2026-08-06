@@ -4,34 +4,54 @@ import AppError from '../errors/AppError.js';
 import { generateVerificationCode } from '../utils/generateVerificationCode.js';
 import { generateAuthToken } from '../utils/generateAuthToken.js';
 import EmailService from './email.service.js';
-import usersRepositories from '../repositories/users.repository.js';
 
 class UsersService {
-  async sendVerificationFlow({ userId, email }) {
+  async _sendVerificationToUser(user, tipo) {
+    if (!user || user.ativo === false) {
+      throw new AppError('Usuário não encontrado com este e-mail.', 404);
+    }
+
+    const existing = await UsersRepositories.getVerifyCode({
+      userId: user.id,
+      tipo,
+    });
+
+    if (
+      existing?.created_at &&
+      Date.now() - new Date(existing.created_at).getTime() < 60000
+    ) {
+      throw new AppError(
+        'Aguarde um minuto antes de solicitar outro código.',
+        429
+      );
+    }
+
     const code = generateVerificationCode();
     const hashedCode = await argon2.hash(code);
 
-    let effectiveUserId = userId;
-    if (!userId) {
-      const user = await UsersRepositories.getUserByEmail({ email });
-
-      if (!user) {
-        throw new AppError('Usuário não encontrado com este e-mail.', 404);
-      }
-      effectiveUserId = user.id;
-    }
-
     await UsersRepositories.saveVerifyUserCode({
-      userId: effectiveUserId,
+      userId: user.id,
       verifyCode: hashedCode,
+      tipo,
     });
 
-    EmailService.sendVerificationEmail(email, code).catch((error) => {
-      console.error(
-        'Falha ao enviar e-mail de verificação em background:',
-        error
-      );
-    });
+    // O destinatário vem sempre do cadastro resolvido no banco. Nunca use o
+    // par userId/e-mail fornecido pelo cliente, que permitiria enviar o código
+    // de uma vítima para um endereço controlado por outra pessoa.
+    await EmailService.sendVerificationEmail(user.email, code);
+  }
+
+  async sendVerificationFlow({ email, tipo = 'VERIFICACAO_EMAIL' }) {
+    const user = await UsersRepositories.getUserByEmail({ email });
+    if (!user && tipo === 'RESET_SENHA') return;
+
+    return this._sendVerificationToUser(user, tipo);
+  }
+
+  async sendVerificationToUserId(userId) {
+    const user = await UsersRepositories.getUserById({ userId });
+
+    return this._sendVerificationToUser(user, 'VERIFICACAO_EMAIL');
   }
 
   async saveNewUser(userData) {
@@ -45,7 +65,7 @@ class UsersService {
         );
       }
 
-      if (userExistence.reason === true) {
+      if (userExistence.reason === true || userExistence.reason === false) {
         throw new AppError(
           'Já existe um usuário cadastrado com este e-mail.',
           409
@@ -55,31 +75,28 @@ class UsersService {
 
     const hashedPassword = await argon2.hash(userData.password);
 
-    let newUser;
-    if (!userExistence.exists) {
-      newUser = await UsersRepositories.saveNewUser({
-        ...userData,
-        password: hashedPassword,
-      });
-    } else {
-      newUser = await UsersRepositories.updateUserInfo({
-        ...userData,
-        password: hashedPassword,
-      });
-    }
+    const newUser = await UsersRepositories.saveNewUser({
+      ...userData,
+      password: hashedPassword,
+    });
 
     const insertedUser = newUser[0];
 
-    await this.sendVerificationFlow({
-      userId: insertedUser.id,
-      email: insertedUser.email,
-    });
+    try {
+      await this.sendVerificationToUserId(insertedUser.id);
+    } catch (error) {
+      console.error('Falha ao enviar o primeiro código de verificação:', error);
+      insertedUser.emailDeliveryPending = true;
+    }
 
     return insertedUser;
   }
 
   async confirmVerifyCode({ code, userId }) {
-    const verifyCode = await UsersRepositories.getVerifyCode({ userId });
+    const verifyCode = await UsersRepositories.getVerifyCode({
+      userId,
+      tipo: 'VERIFICACAO_EMAIL',
+    });
 
     if (!verifyCode) {
       throw new AppError(
@@ -92,36 +109,63 @@ class UsersService {
     const expiresAt = new Date(verifyCode.expires_at);
 
     if (now > expiresAt) {
+      await UsersRepositories.consumeVerifyCode({ id: verifyCode.id });
       throw new AppError(
         'Este código de verificação expirou. Solicite um novo envio.',
         400
       );
     }
 
-    const isValid = await argon2.verify(verifyCode.codigo, code);
-
-    if (!isValid) {
+    if (Number(verifyCode.tentativas_falhas) >= 5) {
       throw new AppError('Código de verificação inválido.', 400);
     }
 
-    const user = await usersRepositories.getUserById({ userId });
+    const isValid = await argon2.verify(verifyCode.codigo, code);
 
-    const token = generateAuthToken(user);
+    if (!isValid) {
+      await UsersRepositories.registerFailedVerificationAttempt({
+        id: verifyCode.id,
+      });
+      throw new AppError('Código de verificação inválido.', 400);
+    }
+
+    const user = await UsersRepositories.getUserById({ userId });
+
+    if (!user || user.ativo === false) {
+      throw new AppError('Código de verificação inválido.', 400);
+    }
+
+    const consumed = await UsersRepositories.consumeVerifyCode({
+      id: verifyCode.id,
+    });
+
+    if (!consumed) {
+      throw new AppError('Código de verificação inválido ou já utilizado.', 400);
+    }
 
     await UsersRepositories.updateUserEmailStatus({ userId });
 
-    return token;
+    const { senha_hash, ...safeUser } = user;
+    return {
+      token: generateAuthToken(user),
+      userData: { ...safeUser, email_verificado: true },
+    };
   }
 
   async updatePassword({ email, code, newPassword }) {
     const user = await UsersRepositories.getUserByEmail({ email });
 
     if (!user) {
-      throw new AppError('Usuário não encontrado com este e-mail.', 404);
+      throw new AppError('Código de verificação inválido ou expirado.', 400);
+    }
+
+    if (user.ativo === false) {
+      throw new AppError('Código de verificação inválido ou expirado.', 400);
     }
 
     const verifyCode = await UsersRepositories.getVerifyCode({
       userId: user.id,
+      tipo: 'RESET_SENHA',
     });
 
     if (!verifyCode) {
@@ -135,16 +179,32 @@ class UsersService {
     const expiresAt = new Date(verifyCode.expires_at);
 
     if (now > expiresAt) {
+      await UsersRepositories.consumeVerifyCode({ id: verifyCode.id });
       throw new AppError(
         'Este código de verificação expirou. Solicite um novo envio.',
         400
       );
     }
 
+    if (Number(verifyCode.tentativas_falhas) >= 5) {
+      throw new AppError('Código de verificação inválido.', 400);
+    }
+
     const isValid = await argon2.verify(verifyCode.codigo, code);
 
     if (!isValid) {
+      await UsersRepositories.registerFailedVerificationAttempt({
+        id: verifyCode.id,
+      });
       throw new AppError('Código de verificação inválido.', 400);
+    }
+
+    const consumed = await UsersRepositories.consumeVerifyCode({
+      id: verifyCode.id,
+    });
+
+    if (!consumed) {
+      throw new AppError('Código de verificação inválido ou já utilizado.', 400);
     }
 
     const hashedPassword = await argon2.hash(newPassword);
@@ -160,20 +220,20 @@ class UsersService {
 
     const userData = updatedUsers[0];
 
-    const token = generateAuthToken(user);
+    const token = generateAuthToken(userData);
 
     return { userData, token };
   }
 
   async login({ email, password }) {
-    const userData = await usersRepositories.getUserByEmail({ email });
+    const userData = await UsersRepositories.getUserByEmail({ email });
 
     if (!userData) {
       throw new AppError('E-mail ou senha inválidos.', 401);
     }
 
-    if (!userData.senha_hash) {
-      return { requiresPasswordSetup: true, userData };
+    if (userData.ativo === false) {
+      throw new AppError('E-mail ou senha inválidos.', 401);
     }
 
     if (!userData.email_verificado || !password) {

@@ -40,4 +40,11 @@ router.delete(
   ContractsController.deleteContract
 );
 
+router.post(
+  '/contracts/:id/historical-payments',
+  authMiddleware,
+  verifyEmployee,
+  ContractsController.registerHistoricalPayments
+);
+
 export default router;

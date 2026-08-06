@@ -26,7 +26,7 @@ router.put(
   PropertiesController.updateProperties
 );
 
-router.put(
+router.delete(
   '/properties/delete/:id',
   authMiddleware,
   verifyEmployee,
@@ -38,6 +38,20 @@ router.get(
   authMiddleware,
   verifyEmployee,
   PropertiesController.getOwners
+);
+
+router.get(
+  '/properties/:id',
+  authMiddleware,
+  verifyEmployee,
+  PropertiesController.getPropertyById
+);
+
+router.get(
+  '/owners',
+  authMiddleware,
+  verifyEmployee,
+  PropertiesController.getOwnersPortfolio
 );
 
 export default router;

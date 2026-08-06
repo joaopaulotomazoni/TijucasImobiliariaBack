@@ -26,7 +26,23 @@ const addressSchema = z.object({
   complemento: z.string().optional(),
 });
 
+const propertyReferenceSchema = z.preprocess(
+  (value) => {
+    if (value === undefined || value === null) return undefined;
+    const normalized = String(value).trim();
+    return normalized || undefined;
+  },
+  z
+    .string()
+    .min(1, { message: 'O número de referência não pode ficar em branco.' })
+    .max(80, {
+      message: 'O número de referência deve possuir no máximo 80 caracteres.',
+    })
+    .optional()
+);
+
 const registerPropertySchema = z.object({
+  numeroReferencia: propertyReferenceSchema,
   tipoImovel: z.enum(
     ['CASA', 'APARTAMENTO', 'COMERCIAL', 'TERRENO', 'GALPAO', 'OUTRO'],
     {
@@ -37,7 +53,7 @@ const registerPropertySchema = z.object({
   ownerId: z.number({
     required_error: 'O proprietário é obrigatório.',
     invalid_type_error: 'O proprietário é obrigatório.',
-  }),
+  }).int().positive(),
   valorAluguelReferencia: toNumber(
     z
       .number({
@@ -136,6 +152,21 @@ class PropertiesController {
     }
   }
 
+  async getPropertyById(request, response, next) {
+    try {
+      const property = await PropertiesServices.getPropertyById(
+        request.params.id
+      );
+
+      return response.status(200).json({
+        status: 'success',
+        property,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   async registerProperties(request, response, next) {
     try {
       const { propertiesData } = request.body;
@@ -195,6 +226,15 @@ class PropertiesController {
         status: 'success',
         data: owners,
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async getOwnersPortfolio(request, response, next) {
+    try {
+      const owners = await PropertiesServices.getOwnersPortfolio();
+      return response.status(200).json({ status: 'success', data: owners });
     } catch (error) {
       next(error);
     }

@@ -1,6 +1,4 @@
 import { pool } from '../config/database.js';
-import AppError from '../errors/AppError.js';
-import { withTransaction } from '../utils/withTransaction.js';
 
 class PaymentsRepository {
   // Todas as parcelas dos contratos em que o usuário é inquilino, com os
@@ -21,6 +19,28 @@ class PaymentsRepository {
          i.id AS imovel_id,
          i.tipo_imovel,
          e.logradouro, e.numero, e.bairro, e.cidade, e.estado,
+         (SELECT json_build_object(
+            'id', gc.id,
+            'gateway', gc.gateway,
+            'externalPaymentId', gc.external_payment_id,
+            'linhaDigitavel', gc.linha_digitavel,
+            'codigoBarras', gc.codigo_barras,
+            'urlBoleto', gc.url_boleto,
+            'urlFatura', gc.url_fatura,
+            'qrCodePix', gc.qr_code_pix,
+            'copiaColaPix', gc.copia_cola_pix,
+            'valor', gc.valor,
+            'dataVencimento', to_char(gc.data_vencimento, 'YYYY-MM-DD'),
+            'statusGateway', gc.status_gateway,
+            'ativa', gc.ativa
+          )
+          FROM gateway_cobrancas gc
+          WHERE gc.parcela_id = p.id
+          -- A cobrança deixa de ser pagável após confirmação/recebimento,
+          -- mas continua visível no histórico do inquilino.
+          ORDER BY gc.ativa DESC, gc.created_at DESC
+          LIMIT 1
+         ) AS cobranca,
          COALESCE(
            (SELECT json_agg(json_build_object(
               'id', pl.id,
@@ -29,7 +49,7 @@ class PaymentsRepository {
               'valor', pl.valor
             ))
             FROM parcela_lancamentos pl
-            WHERE pl.parcela_id = p.id),
+            WHERE pl.parcela_id = p.id AND pl.tipo <> 'TAXA'),
            '[]'::json
          ) AS lancamentos,
          COALESCE(
@@ -38,10 +58,10 @@ class PaymentsRepository {
               'valor_pago', pay.valor_pago,
               'data_pagamento', pay.data_pagamento,
               'forma_pagamento', pay.forma_pagamento,
-              'comprovante_url', pay.comprovante_url
+              'origem', pay.origem
             ) ORDER BY pay.data_pagamento DESC)
             FROM pagamentos pay
-            WHERE pay.parcela_id = p.id),
+            WHERE pay.parcela_id = p.id AND pay.estornado_em IS NULL),
            '[]'::json
          ) AS pagamentos
        FROM parcelas p
@@ -52,75 +72,36 @@ class PaymentsRepository {
          SELECT 1 FROM contrato_inquilinos ci
          WHERE ci.contrato_id = c.id AND ci.usuario_id = $1
        )
-       ORDER BY p.data_vencimento DESC`,
+       ORDER BY p.data_vencimento ASC, p.id ASC`,
       [usuarioId]
     );
 
     return rows;
   }
 
-  // Registra um pagamento contra uma parcela do próprio usuário (o join com
-  // contrato_inquilinos garante que ninguém paga a parcela de outra pessoa) e
-  // recalcula o status da parcela a partir da soma de tudo que já foi pago.
-  async registerPayment(
-    parcelaId,
-    usuarioId,
-    { valorPago, dataPagamento, formaPagamento, comprovanteKey }
-  ) {
-    return withTransaction(async (client) => {
-      const parcelaResult = await client.query(
-        `SELECT p.id, p.status
-         FROM parcelas p
-         JOIN contratos c ON c.id = p.contrato_id
-         JOIN contrato_inquilinos ci ON ci.contrato_id = c.id
-         WHERE p.id = $1 AND ci.usuario_id = $2`,
-        [parcelaId, usuarioId]
-      );
+  async getUltimaCobrancaByUsuario(parcelaId, usuarioId) {
+    const { rows } = await pool.query(
+      `SELECT gc.id, gc.parcela_id, gc.gateway, gc.external_payment_id, gc.linha_digitavel,
+              gc.codigo_barras, gc.url_boleto, gc.url_fatura, gc.qr_code_pix,
+              gc.copia_cola_pix, gc.valor,
+              to_char(gc.data_vencimento, 'YYYY-MM-DD') AS data_vencimento,
+              gc.status_gateway, gc.ativa
+       FROM gateway_cobrancas gc
+       JOIN parcelas p ON p.id = gc.parcela_id
+       WHERE gc.parcela_id = $1
+         AND EXISTS (
+           SELECT 1
+           FROM contrato_inquilinos ci
+           WHERE ci.contrato_id = p.contrato_id AND ci.usuario_id = $2
+         )
+       ORDER BY gc.ativa DESC, gc.created_at DESC
+       LIMIT 1`,
+      [parcelaId, usuarioId]
+    );
 
-      if (parcelaResult.rows.length === 0) {
-        throw new AppError('Parcela não encontrada.', 404);
-      }
-
-      const { status } = parcelaResult.rows[0];
-
-      if (status === 'PAGA' || status === 'CANCELADA') {
-        throw new AppError('Esta parcela já está paga ou cancelada.', 409);
-      }
-
-      await client.query(
-        `INSERT INTO pagamentos (parcela_id, valor_pago, data_pagamento, forma_pagamento, comprovante_url, registrado_por)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          parcelaId,
-          valorPago,
-          dataPagamento,
-          formaPagamento,
-          comprovanteKey || null,
-          usuarioId,
-        ]
-      );
-
-      const totalsResult = await client.query(
-        `SELECT
-           p.valor_base
-             + COALESCE((SELECT SUM(valor) FROM parcela_lancamentos WHERE parcela_id = p.id), 0) AS valor_total,
-           COALESCE((SELECT SUM(valor_pago) FROM pagamentos WHERE parcela_id = p.id), 0) AS valor_pago_total
-         FROM parcelas p WHERE p.id = $1`,
-        [parcelaId]
-      );
-
-      const { valor_total, valor_pago_total } = totalsResult.rows[0];
-      const newStatus =
-        Number(valor_pago_total) >= Number(valor_total) ? 'PAGA' : 'PARCIAL';
-
-      await client.query(`UPDATE parcelas SET status = $1 WHERE id = $2`, [
-        newStatus,
-        parcelaId,
-      ]);
-
-      return { id: Number(parcelaId), status: newStatus };
-    });
+    return rows[0] || null;
   }
+
 }
 
 export default new PaymentsRepository();

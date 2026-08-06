@@ -8,10 +8,14 @@ const router = Router();
 // parcelas, não ao corretor/admin.
 router.get('/payments/my', authMiddleware, PaymentsController.getMyPayments);
 
-router.post(
-  '/payments/:parcelaId/pagar',
+router.get(
+  '/payments/:parcelaId/boleto',
   authMiddleware,
-  PaymentsController.registerPayment
+  PaymentsController.getMyBoleto
 );
+
+// O cliente paga usando URL/linha digitável/Pix da cobrança acima. A baixa é
+// feita exclusivamente pelo webhook do gateway. O antigo POST /pagar permitia
+// que o próprio inquilino declarasse um pagamento legado como concluído.
 
 export default router;

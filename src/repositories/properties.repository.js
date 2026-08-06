@@ -1,46 +1,47 @@
-import supabase from '../config/database.js';
+import supabase, { pool } from '../config/database.js';
 import AppError from '../errors/AppError.js';
 import { withTransaction } from '../utils/withTransaction.js';
+
+const PROPERTY_SELECT = `id,
+  numero_referencia,
+  tipo_imovel,
+  valor_aluguel_referencia,
+  valor_condominio,
+  valor_iptu,
+  area_util,
+  quartos,
+  banheiros,
+  vagas_garagem,
+  matricula,
+  inscricao_iptu,
+  observacoes,
+  status,
+  endereco:enderecos!endereco_id (
+    id,
+    pais,
+    cep,
+    estado,
+    cidade,
+    bairro,
+    logradouro,
+    numero,
+    complemento,
+    latitude,
+    longitude
+  ),
+  proprietario:usuarios!proprietario_id (
+    id,
+    nome_completo,
+    documento,
+    email,
+    telefone
+  )`;
 
 class PropertiesRepository {
   async getProperties() {
     const { data, error } = await supabase
       .from('imoveis')
-      .select(
-        `id,
-         tipo_imovel,
-         valor_aluguel_referencia,
-         valor_condominio,
-         valor_iptu,
-         area_util,
-         quartos,
-         banheiros,
-         vagas_garagem,
-         matricula,
-         inscricao_iptu,
-         observacoes,
-         status,
-         endereco:enderecos!endereco_id (
-           id,
-           pais,
-           cep,
-           estado,
-           cidade,
-           bairro,
-           logradouro,
-           numero,
-           complemento,
-           latitude,
-           longitude
-         ),
-         proprietario:usuarios!proprietario_id (
-           id,
-           nome_completo,
-           documento,
-           email,
-           telefone
-         )`
-      )
+      .select(PROPERTY_SELECT)
       .order('id', { ascending: true });
 
     if (error) {
@@ -50,7 +51,22 @@ class PropertiesRepository {
     return data;
   }
 
+  async getPropertyById(id) {
+    const { data, error } = await supabase
+      .from('imoveis')
+      .select(PROPERTY_SELECT)
+      .eq('id', id)
+      .maybeSingle();
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return data;
+  }
+
   async registerProperties({
+    numeroReferencia,
     tipoImovel,
     ownerId,
     valorAluguelReferencia,
@@ -67,6 +83,24 @@ class PropertiesRepository {
     address,
   }) {
     return withTransaction(async (client) => {
+      const owner = await client.query(
+        `SELECT id FROM usuarios
+         WHERE id = $1 AND perfil = 'CLIENTE' AND ativo`,
+        [ownerId]
+      );
+      if (owner.rows.length === 0) {
+        throw new AppError(
+          'O proprietário deve ser um cliente ativo.',
+          400
+        );
+      }
+      if (status === 'ALUGADO') {
+        throw new AppError(
+          'O imóvel só pode ficar alugado pela criação de um contrato.',
+          409
+        );
+      }
+
       const enderecoResult = await client.query(
         `INSERT INTO enderecos (cep, estado, cidade, bairro, logradouro, numero, complemento)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -86,14 +120,15 @@ class PropertiesRepository {
       try {
         await client.query(
           `INSERT INTO imoveis (
-             endereco_id, proprietario_id, tipo_imovel, valor_aluguel_referencia,
+             endereco_id, proprietario_id, numero_referencia, tipo_imovel, valor_aluguel_referencia,
              valor_condominio, valor_iptu, area_util, quartos, banheiros,
              vagas_garagem, matricula, inscricao_iptu, observacoes, status
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
           [
             enderecoId,
             ownerId,
+            numeroReferencia || null,
             tipoImovel,
             valorAluguelReferencia,
             valorCondominio ?? null,
@@ -109,6 +144,9 @@ class PropertiesRepository {
           ]
         );
       } catch (error) {
+        if (error.code === '23505') {
+          throw new AppError('O número de referência do imóvel já está em uso.', 409);
+        }
         if (error.code === '23503') {
           throw new AppError('Proprietário informado não existe.', 404);
         }
@@ -121,6 +159,7 @@ class PropertiesRepository {
   async updateProperties(
     id,
     {
+      numeroReferencia,
       tipoImovel,
       ownerId,
       valorAluguelReferencia,
@@ -139,12 +178,52 @@ class PropertiesRepository {
   ) {
     return withTransaction(async (client) => {
       const existingProperty = await client.query(
-        `SELECT id FROM imoveis WHERE id = $1`,
+        `SELECT id, proprietario_id, status,
+                EXISTS (
+                  SELECT 1 FROM contratos c
+                  WHERE c.imovel_id = imoveis.id
+                    AND c.status IN ('ATIVO', 'INADIMPLENTE')
+                ) AS possui_contrato_vigente
+         FROM imoveis WHERE id = $1 FOR UPDATE`,
         [id]
       );
 
       if (existingProperty.rows.length === 0) {
         throw new AppError('Imóvel não encontrado.', 404);
+      }
+
+      const current = existingProperty.rows[0];
+      const owner = await client.query(
+        `SELECT id FROM usuarios
+         WHERE id = $1 AND perfil = 'CLIENTE' AND ativo`,
+        [ownerId]
+      );
+      if (owner.rows.length === 0) {
+        throw new AppError(
+          'O proprietário deve ser um cliente ativo.',
+          400
+        );
+      }
+      if (
+        current.possui_contrato_vigente &&
+        String(current.proprietario_id) !== String(ownerId)
+      ) {
+        throw new AppError(
+          'Não é possível trocar o proprietário enquanto houver contrato vigente.',
+          409
+        );
+      }
+      if (current.possui_contrato_vigente && status !== 'ALUGADO') {
+        throw new AppError(
+          'Um imóvel com contrato vigente deve permanecer com status ALUGADO.',
+          409
+        );
+      }
+      if (!current.possui_contrato_vigente && status === 'ALUGADO') {
+        throw new AppError(
+          'O imóvel só pode ficar alugado pela criação de um contrato.',
+          409
+        );
       }
 
       let enderecoId;
@@ -214,13 +293,16 @@ class PropertiesRepository {
       try {
         await client.query(
           `UPDATE imoveis
-           SET endereco_id = $1, proprietario_id = $2, tipo_imovel = $3, valor_aluguel_referencia = $4,
-               valor_condominio = $5, valor_iptu = $6, area_util = $7, quartos = $8, banheiros = $9,
-               vagas_garagem = $10, matricula = $11, inscricao_iptu = $12, observacoes = $13, status = $14
-           WHERE id = $15`,
+           SET endereco_id = $1, proprietario_id = $2, numero_referencia = $3,
+               tipo_imovel = $4, valor_aluguel_referencia = $5,
+               valor_condominio = $6, valor_iptu = $7, area_util = $8,
+               quartos = $9, banheiros = $10, vagas_garagem = $11,
+               matricula = $12, inscricao_iptu = $13, observacoes = $14, status = $15
+           WHERE id = $16`,
           [
             enderecoId,
             ownerId,
+            numeroReferencia || null,
             tipoImovel,
             valorAluguelReferencia,
             valorCondominio ?? null,
@@ -237,6 +319,9 @@ class PropertiesRepository {
           ]
         );
       } catch (error) {
+        if (error.code === '23505') {
+          throw new AppError('O número de referência do imóvel já está em uso.', 409);
+        }
         if (error.code === '23503') {
           throw new AppError('Proprietário informado não existe.', 404);
         }
@@ -250,6 +335,7 @@ class PropertiesRepository {
     const { data, error } = await supabase
       .from('usuarios')
       .select('id, documento, nome_completo')
+      .eq('perfil', 'CLIENTE')
       .order('nome_completo', { ascending: true });
 
     if (error) {
@@ -257,6 +343,30 @@ class PropertiesRepository {
     }
 
     return data;
+  }
+
+  async getOwnersPortfolio() {
+    const { rows } = await pool.query(
+      `SELECT u.id, u.nome_completo, u.documento, u.email, u.telefone,
+              count(i.id)::int AS quantidade_imoveis,
+              COALESCE(json_agg(json_build_object(
+                'id', i.id,
+                'numeroReferencia', i.numero_referencia,
+                'tipo', i.tipo_imovel,
+                'status', i.status,
+                'logradouro', e.logradouro,
+                'numero', e.numero,
+                'bairro', e.bairro,
+                'cidade', e.cidade,
+                'estado', e.estado
+              ) ORDER BY i.id), '[]'::json) AS imoveis
+       FROM usuarios u
+       JOIN imoveis i ON i.proprietario_id = u.id
+       LEFT JOIN enderecos e ON e.id = i.endereco_id
+       GROUP BY u.id
+       ORDER BY u.nome_completo`
+    );
+    return rows;
   }
 
   async deleteProperties(id) {

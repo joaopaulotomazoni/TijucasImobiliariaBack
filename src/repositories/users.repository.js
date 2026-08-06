@@ -1,4 +1,4 @@
-import supabase from '../config/database.js';
+import supabase, { pool } from '../config/database.js';
 
 class UsersRepository {
   async verifyUserExistence({ email, document }) {
@@ -92,7 +92,7 @@ class UsersRepository {
     return data;
   }
 
-  async saveVerifyUserCode({ userId, verifyCode }) {
+  async saveVerifyUserCode({ userId, verifyCode, tipo }) {
     const now = new Date();
     const expires = new Date(now.getTime() + 15 * 60 * 1000);
 
@@ -100,10 +100,13 @@ class UsersRepository {
       {
         usuario_id: userId,
         codigo: verifyCode,
+        tipo,
+        usado_em: null,
+        tentativas_falhas: 0,
         created_at: now.toISOString(),
         expires_at: expires.toISOString(),
       },
-      { onConflict: 'usuario_id' }
+      { onConflict: 'usuario_id,tipo' }
     );
 
     if (error) {
@@ -113,11 +116,13 @@ class UsersRepository {
     return data;
   }
 
-  async getVerifyCode({ userId }) {
+  async getVerifyCode({ userId, tipo }) {
     const { data, error } = await supabase
       .from('codigo_verificacao')
-      .select('codigo, expires_at')
+      .select('id, codigo, expires_at, created_at, tentativas_falhas')
       .eq('usuario_id', userId)
+      .eq('tipo', tipo)
+      .is('usado_em', null)
       .maybeSingle();
 
     if (error) {
@@ -125,6 +130,37 @@ class UsersRepository {
     }
 
     return data;
+  }
+
+  async registerFailedVerificationAttempt({ id }) {
+    const { rows } = await pool.query(
+      `UPDATE codigo_verificacao
+       SET tentativas_falhas = tentativas_falhas + 1,
+           usado_em = CASE
+             WHEN tentativas_falhas + 1 >= 5 THEN now()
+             ELSE usado_em
+           END
+       WHERE id = $1 AND usado_em IS NULL
+       RETURNING tentativas_falhas`,
+      [id]
+    );
+
+    return rows[0]?.tentativas_falhas ?? null;
+  }
+
+  async consumeVerifyCode({ id }) {
+    const { data, error } = await supabase
+      .from('codigo_verificacao')
+      .update({ usado_em: new Date().toISOString() })
+      .eq('id', id)
+      .is('usado_em', null)
+      .select('id');
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    return data.length === 1;
   }
 
   async updateUserEmailStatus({ userId }) {
@@ -142,24 +178,24 @@ class UsersRepository {
   }
 
   async updateUserPassword({ userId, password }) {
-    const { data, error } = await supabase
-      .from('usuarios')
-      .update({ senha_hash: password })
-      .eq('id', userId)
-      .select('id, nome_completo, email, telefone, documento, perfil');
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    return data;
+    const { rows } = await pool.query(
+      `UPDATE usuarios
+       SET senha_hash = $1,
+           password_changed_at = now(),
+           auth_version = auth_version + 1
+       WHERE id = $2
+       RETURNING id, nome_completo, email, telefone, documento, perfil,
+                 auth_version`,
+      [password, userId]
+    );
+    return rows;
   }
 
   async getUserByEmail({ email }) {
     const { data, error } = await supabase
       .from('usuarios')
       .select(
-        'id, email, senha_hash, telefone, documento, nome_completo, perfil, email_verificado'
+        'id, email, senha_hash, telefone, documento, nome_completo, perfil, email_verificado, ativo, auth_version'
       )
       .eq('email', email)
       .maybeSingle();
@@ -175,7 +211,7 @@ class UsersRepository {
     const { data, error } = await supabase
       .from('usuarios')
       .select(
-        'id, email, senha_hash, telefone, documento, nome_completo, perfil, email_verificado'
+        'id, email, senha_hash, telefone, documento, nome_completo, perfil, email_verificado, ativo, auth_version'
       )
       .eq('id', userId)
       .maybeSingle();
